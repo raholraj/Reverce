@@ -1,0 +1,439 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  ReverseShield — GitHub Actions: Build Android APK (C++ SDL2 + ImGui)     ║
+# ║                                                                            ║
+# ║  YEH FLUTTER NAHI HAI — Pure C++ NDK build via SDL2 Android port          ║
+# ║                                                                            ║
+# ║  Triggers: push to main / manual dispatch                                  ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: Build Android APK (NDK + SDL2)
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+env:
+  NDK_VERSION:    "26.3.11579264"
+  ANDROID_API:    "24"
+  SDL2_TAG:       "release-2.30.3"
+  IMGUI_TAG:      "v1.91.0"
+  IMPLOT_TAG:     "v0.17"
+  APP_ID:         "com.reverseshield.app"
+  BUILD_NUMBER:   ${{ github.run_number }}
+
+jobs:
+  build-android-apk:
+    name: Build Android APK (C++ NDK)
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Java ──────────────────────────────────────────────────────────────
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── 3. Android SDK + NDK ─────────────────────────────────────────────────
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: "11076708"
+
+      - name: Install NDK and Build-Tools
+        run: |
+          sdkmanager --install \
+            "ndk;${{ env.NDK_VERSION }}" \
+            "build-tools;34.0.0" \
+            "platforms;android-34"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      # ── 4. Clone third-party sources ─────────────────────────────────────────
+      - name: Clone SDL2
+        run: |
+          git clone --depth=1 --branch ${{ env.SDL2_TAG }} \
+            https://github.com/libsdl-org/SDL.git /tmp/SDL2
+
+      - name: Clone Dear ImGui
+        run: |
+          git clone --depth=1 --branch ${{ env.IMGUI_TAG }} \
+            https://github.com/ocornut/imgui.git /tmp/imgui
+
+      - name: Clone ImPlot
+        run: |
+          git clone --depth=1 --branch ${{ env.IMPLOT_TAG }} \
+            https://github.com/epezent/implot.git /tmp/implot
+
+      # ── 5. Create Android project skeleton ───────────────────────────────────
+      - name: Create Android project directories
+        run: |
+          mkdir -p android-build/app/src/main/java/org/libsdl/app
+          mkdir -p android-build/app/src/main/cpp/src/core
+          mkdir -p android-build/app/src/main/cpp/src/ui
+          mkdir -p android-build/app/src/main/res/values
+          mkdir -p android-build/app/src/main/res/drawable
+          mkdir -p android-build/gradle/wrapper
+
+      # ── 6. Copy SDL2 Java activity (required for Android) ────────────────────
+      - name: Copy SDL2 Java source files
+        run: |
+          cp /tmp/SDL2/android-project/app/src/main/java/org/libsdl/app/*.java \
+             android-build/app/src/main/java/org/libsdl/app/
+
+      # ── 7. Copy C++ source files ─────────────────────────────────────────────
+      - name: Copy project C++ sources
+        run: |
+          cp src/main.cpp         android-build/app/src/main/cpp/src/
+          cp src/core/*.hpp       android-build/app/src/main/cpp/src/core/
+          cp src/ui/*.hpp         android-build/app/src/main/cpp/src/ui/
+
+      # ── 8. Copy third-party C++ libraries ───────────────────────────────────
+      - name: Copy SDL2, ImGui, ImPlot sources
+        run: |
+          cp -r /tmp/SDL2    android-build/app/src/main/cpp/SDL2
+          cp -r /tmp/imgui   android-build/app/src/main/cpp/imgui
+          cp -r /tmp/implot  android-build/app/src/main/cpp/implot
+
+      # ── 9. Patch source for OpenGL ES (Android has ES, not desktop GL) ───────
+      # Desktop: OpenGL 3.3 Core  →  Android: OpenGL ES 3.0
+      - name: Patch app.hpp for OpenGL ES 3.0
+        run: |
+          SRC=android-build/app/src/main/cpp/src/ui/app.hpp
+
+          # SDL_opengl.h  →  SDL_opengles2.h
+          sed -i 's|#include <SDL_opengl.h>|#include <SDL_opengles2.h>|' "$SRC"
+
+          # Remove FORWARD_COMPATIBLE (invalid on ES)
+          sed -i '/SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG/d' "$SRC"
+
+          # Core profile  →  ES profile
+          sed -i 's/SDL_GL_CONTEXT_PROFILE_CORE/SDL_GL_CONTEXT_PROFILE_ES/' "$SRC"
+
+          # Minor version 3,3 → 3,0  (OpenGL ES 3.0)
+          sed -i '/SDL_GL_CONTEXT_MINOR_VERSION/{s/, 3)/, 0)/}' "$SRC"
+
+          # ImGui GLSL version: #version 330 → #version 300 es
+          sed -i 's/ImGui_ImplOpenGL3_Init("#version 330")/ImGui_ImplOpenGL3_Init("#version 300 es")/' "$SRC"
+
+          echo "=== Patched app.hpp (GL lines) ==="
+          grep -n "opengl\|GL_CONTEXT\|ImplOpenGL3_Init\|version" "$SRC" || true
+
+      # ── 10. Write Android CMakeLists.txt (builds a shared .so) ───────────────
+      - name: Write Android CMakeLists.txt
+        run: |
+          cat > android-build/app/src/main/cpp/CMakeLists.txt << 'CMAKEOF'
+          cmake_minimum_required(VERSION 3.22)
+          project(reverseshield CXX C)
+
+          set(CMAKE_CXX_STANDARD 20)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+          # ── SDL2 (Android build is already configured for NDK) ────────────────
+          add_subdirectory(SDL2 EXCLUDE_FROM_ALL)
+
+          # ── Dear ImGui (OpenGL ES 3 backend) ─────────────────────────────────
+          add_library(imgui STATIC
+              imgui/imgui.cpp
+              imgui/imgui_draw.cpp
+              imgui/imgui_tables.cpp
+              imgui/imgui_widgets.cpp
+              imgui/imgui_demo.cpp
+              imgui/backends/imgui_impl_sdl2.cpp
+              imgui/backends/imgui_impl_opengl3.cpp
+          )
+          target_include_directories(imgui PUBLIC imgui imgui/backends)
+          target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
+          target_link_libraries(imgui PUBLIC SDL2::SDL2)
+
+          # ── ImPlot ────────────────────────────────────────────────────────────
+          add_library(implot STATIC
+              implot/implot.cpp
+              implot/implot_items.cpp
+          )
+          target_include_directories(implot PUBLIC implot)
+          target_link_libraries(implot PUBLIC imgui)
+
+          # ── Main shared library ───────────────────────────────────────────────
+          # Android loads "libmain.so" via SDLActivity — name MUST be "main"
+          file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
+          add_library(main SHARED ${SOURCES})
+
+          target_include_directories(main PRIVATE
+              src
+              imgui
+              imgui/backends
+              implot
+          )
+
+          target_compile_definitions(main PRIVATE IMGUI_IMPL_OPENGL_ES3)
+          target_compile_options(main PRIVATE -O2 -Wall)
+
+          # Android system libraries
+          find_library(log-lib  log)
+          find_library(gles3-lib GLESv3)
+          find_library(egl-lib  EGL)
+
+          target_link_libraries(main PRIVATE
+              imgui
+              implot
+              SDL2::SDL2
+              SDL2::SDL2main
+              ${log-lib}
+              ${gles3-lib}
+              ${egl-lib}
+          )
+          CMAKEOF
+
+      # ── 11. AndroidManifest.xml ───────────────────────────────────────────────
+      - name: Write AndroidManifest.xml
+        run: |
+          cat > android-build/app/src/main/AndroidManifest.xml << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.reverseshield.app">
+
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="32"/>
+              <uses-feature android:glEsVersion="0x00030000" android:required="true"/>
+
+              <application
+                  android:label="ReverseShield"
+                  android:allowBackup="false"
+                  android:hardwareAccelerated="true"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+                  <activity
+                      android:name="org.libsdl.app.SDLActivity"
+                      android:label="ReverseShield"
+                      android:screenOrientation="landscape"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="keyboardHidden|keyboard|screenSize|orientation|density">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          XMLEOF
+
+      # ── 12. strings.xml ───────────────────────────────────────────────────────
+      - name: Write strings.xml
+        run: |
+          cat > android-build/app/src/main/res/values/strings.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">ReverseShield</string>
+          </resources>
+          EOF
+
+      # ── 13. Root build.gradle ─────────────────────────────────────────────────
+      - name: Write root build.gradle
+        run: |
+          cat > android-build/build.gradle << 'EOF'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.2.2'
+              }
+          }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
+          EOF
+
+      # ── 14. settings.gradle ────────────────────────────────────────────────────
+      - name: Write settings.gradle
+        run: |
+          cat > android-build/settings.gradle << 'EOF'
+          rootProject.name = "ReverseShield"
+          include ':app'
+          EOF
+
+      # ── 15. gradle.properties ─────────────────────────────────────────────────
+      - name: Write gradle.properties
+        run: |
+          cat > android-build/gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m
+          org.gradle.daemon=false
+          android.useAndroidX=false
+          EOF
+
+      # ── 16. App build.gradle ───────────────────────────────────────────────────
+      - name: Write app/build.gradle
+        run: |
+          cat > android-build/app/build.gradle << EOF
+          apply plugin: 'com.android.application'
+
+          android {
+              namespace          "com.reverseshield.app"
+              compileSdk         34
+              ndkVersion         "${{ env.NDK_VERSION }}"
+
+              defaultConfig {
+                  applicationId  "com.reverseshield.app"
+                  minSdk         ${{ env.ANDROID_API }}
+                  targetSdk      34
+                  versionCode    ${{ env.BUILD_NUMBER }}
+                  versionName    "1.0.${{ env.BUILD_NUMBER }}"
+
+                  externalNativeBuild {
+                      cmake {
+                          cppFlags   "-std=c++20 -DIMGUI_IMPL_OPENGL_ES3"
+                          // arm64 = most modern phones; armeabi-v7a = older 32-bit
+                          abiFilters "arm64-v8a", "armeabi-v7a"
+                      }
+                  }
+              }
+
+              externalNativeBuild {
+                  cmake {
+                      path    "src/main/cpp/CMakeLists.txt"
+                      version "3.22.1"
+                  }
+              }
+
+              buildTypes {
+                  debug {
+                      debuggable          true
+                      jniDebuggable       true
+                  }
+                  release {
+                      minifyEnabled       false
+                      // Uses debug signing for CI; replace with your keystore for Play Store
+                      signingConfig       signingConfigs.debug
+                  }
+              }
+
+              packagingOptions {
+                  jniLibs {
+                      // Strip debug symbols from release to reduce APK size
+                      useLegacyPackaging false
+                  }
+              }
+          }
+          EOF
+
+      # ── 17. Gradle Wrapper ────────────────────────────────────────────────────
+      - name: Setup Gradle wrapper files
+        run: |
+          cat > android-build/gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.4-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+          # Download gradlew script
+          curl -fsSL \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.4.0/gradlew" \
+            -o android-build/gradlew
+          chmod +x android-build/gradlew
+
+          # gradlew.bat (optional for Windows)
+          curl -fsSL \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.4.0/gradlew.bat" \
+            -o android-build/gradlew.bat
+
+          # gradle-wrapper.jar
+          curl -fsSL \
+            "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar" \
+            -o android-build/gradle/wrapper/gradle-wrapper.jar
+
+      # ── 18. local.properties (Android SDK path for Gradle) ───────────────────
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME"  > android-build/local.properties
+          echo "ndk.dir=$NDK_HOME"     >> android-build/local.properties
+
+      # ── 19. Build Debug APK ───────────────────────────────────────────────────
+      - name: Build Debug APK
+        working-directory: android-build
+        run: |
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            -Pandroid.ndkVersion="${{ env.NDK_VERSION }}"
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          JAVA_HOME:    ${{ env.JAVA_HOME }}
+
+      # ── 20. Show APK info ─────────────────────────────────────────────────────
+      - name: Show built APK
+        run: |
+          echo "=== APK files ==="
+          find android-build -name "*.apk" -exec ls -lh {} \;
+
+      # ── 21. Upload APK artifact ───────────────────────────────────────────────
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReverseShield-debug-build${{ env.BUILD_NUMBER }}
+          path: android-build/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Create GitHub Release on version tags  (e.g. git tag v1.0.0 && git push --tags)
+  # ────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-android-apk
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ReverseShield-debug-build${{ github.run_number }}
+          path: release-files/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ github.ref_name }}
+          name:       "ReverseShield ${{ github.ref_name }}"
+          draft:      false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          body: |
+            ## ReverseShield — Binary Analysis Tool (Android)
+
+            Built with SDL2 + Dear ImGui + ImPlot via Android NDK.
+
+            ### Downloads
+            | File | Target |
+            |------|--------|
+            | `*-arm64-v8a.apk`    | 64-bit ARM (most modern phones) |
+            | `*-armeabi-v7a.apk`  | 32-bit ARM (older phones) |
+
+            ### Build Info
+            - Build: `${{ github.run_number }}`
+            - Commit: `${{ github.sha }}`
+            - NDK: `${{ env.NDK_VERSION }}`
+          files: release-files/**
