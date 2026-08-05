@@ -42,6 +42,12 @@ jobs:
             "platforms;android-34"
           echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
 
+      - name: Extract ReverseShield.zip
+        run: |
+          unzip ReverseShield.zip -d extracted/
+          echo "=== Extracted files ==="
+          find extracted/ -type f
+
       - name: Clone SDL2
         run: |
           git clone --depth=1 --branch ${{ env.SDL2_TAG }} \
@@ -60,7 +66,8 @@ jobs:
       - name: Create Android project directories
         run: |
           mkdir -p android-build/app/src/main/java/org/libsdl/app
-          mkdir -p android-build/app/src/main/cpp
+          mkdir -p android-build/app/src/main/cpp/src/core
+          mkdir -p android-build/app/src/main/cpp/src/ui
           mkdir -p android-build/app/src/main/res/values
           mkdir -p android-build/gradle/wrapper
 
@@ -69,9 +76,12 @@ jobs:
           cp /tmp/SDL2/android-project/app/src/main/java/org/libsdl/app/*.java \
              android-build/app/src/main/java/org/libsdl/app/
 
-      - name: Copy project C++ sources
+      - name: Copy project C++ sources from zip
         run: |
-          cp -r src android-build/app/src/main/cpp/
+          SRC_DIR=$(find extracted/ -name "main.cpp" -exec dirname {} \; | head -1)
+          cp "$SRC_DIR/main.cpp" android-build/app/src/main/cpp/src/
+          cp "$SRC_DIR/core/"*.hpp android-build/app/src/main/cpp/src/core/
+          cp "$SRC_DIR/ui/"*.hpp android-build/app/src/main/cpp/src/ui/
           echo "=== Copied sources ==="
           find android-build/app/src/main/cpp/src/ -type f
 
@@ -205,6 +215,7 @@ jobs:
           android {
             namespace "com.reverseshield.app"
             compileSdk 34
+            ndkVersion "26.3.11579264"
             defaultConfig {
               applicationId "com.reverseshield.app"
               minSdk 24
