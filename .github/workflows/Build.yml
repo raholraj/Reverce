@@ -94,14 +94,18 @@ jobs:
           cp -r /tmp/imgui android-build/app/src/main/cpp/imgui
           cp -r /tmp/implot android-build/app/src/main/cpp/implot
 
-      - name: Patch app.hpp for OpenGL ES 3.0
+      - name: Patch app.hpp for OpenGL ES 3.0 and Syntax Errors
         run: |
           SRC=android-build/app/src/main/cpp/src/ui/app.hpp
+          # OpenGL ES Patches
           sed -i 's|#include <SDL_opengl.h>|#include <GLES3/gl3.h>|' "$SRC"
           sed -i '/SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG/d' "$SRC"
           sed -i 's/SDL_GL_CONTEXT_PROFILE_CORE/SDL_GL_CONTEXT_PROFILE_ES/' "$SRC"
           sed -i 's/SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)/SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0)/' "$SRC"
           sed -i 's/ImGui_ImplOpenGL3_Init("#version 330")/ImGui_ImplOpenGL3_Init("#version 300 es")/' "$SRC"
+          # ImGui Color Enum Patches (Fixing the C++ Error)
+          sed -i 's/ImGuiCol_ScrollbarGrabH/ImGuiCol_ScrollbarGrabHovered/g' "$SRC"
+          sed -i 's/ImGuiCol_ScrollbarGrabA/ImGuiCol_ScrollbarGrabActive/g' "$SRC"
 
       - name: Write Android CMakeLists.txt
         run: |
