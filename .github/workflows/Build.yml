@@ -97,7 +97,7 @@ jobs:
       - name: Patch app.hpp for OpenGL ES 3.0
         run: |
           SRC=android-build/app/src/main/cpp/src/ui/app.hpp
-          sed -i 's|#include <SDL.h>|#include <SDL.h>\n#include <GLES3/gl3.h>|' "$SRC"
+          sed -i 's|#include <SDL_opengl.h>|#include <GLES3/gl3.h>|' "$SRC"
           sed -i '/SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG/d' "$SRC"
           sed -i 's/SDL_GL_CONTEXT_PROFILE_CORE/SDL_GL_CONTEXT_PROFILE_ES/' "$SRC"
           sed -i 's/SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)/SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0)/' "$SRC"
@@ -124,7 +124,7 @@ jobs:
           )
           target_include_directories(imgui PUBLIC imgui imgui/backends)
           target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
-          target_link_libraries(imgui PUBLIC SDL2)
+          target_link_libraries(imgui PUBLIC SDL2::SDL2)
 
           add_library(implot STATIC
             implot/implot.cpp
@@ -135,7 +135,7 @@ jobs:
 
           file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
           add_library(main SHARED ${SOURCES})
-          target_include_directories(main PRIVATE src imgui imgui/backends implot)
+          target_include_directories(main PRIVATE src imgui imgui/backends implot SDL2/include)
           target_compile_definitions(main PRIVATE IMGUI_IMPL_OPENGL_ES3)
           target_compile_options(main PRIVATE -O2 -Wall)
 
@@ -144,7 +144,7 @@ jobs:
           find_library(egl-lib EGL)
 
           target_link_libraries(main PRIVATE
-            imgui implot SDL2 SDL2main
+            imgui implot SDL2::SDL2 SDL2::SDL2main
             ${log-lib} ${gles3-lib} ${egl-lib}
           )
           CMAKEOF
